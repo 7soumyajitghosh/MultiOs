@@ -3,23 +3,50 @@
  * Handles process lifecycle, scheduling, resource monitoring, and inter-process communication
  */
 
-import { EventEmitter } from 'events';
-import {
+import type {
   ProcessDefinition,
   ProcessInstance,
   ProcessStatus,
   ProcessPriority,
   ProcessType,
   ProcessContext,
-  ProcessResult,
   ProcessResourceUsage,
-  ProcessSchedule,
   ProcessManagerConfig,
   ProcessEvent,
   ProcessEventType,
   ProcessFilter,
-  uid,
+  ProcessStats,
 } from './ProcessTypes';
+
+// Minimal browser-safe event emitter (avoids node 'events' dependency in the web app)
+class Emitter {
+  private handlers = new Map<string, Set<(...args: any[]) => void>>();
+  on(event: string, fn: (...args: any[]) => void): this {
+    if (!this.handlers.has(event)) this.handlers.set(event, new Set());
+    this.handlers.get(event)!.add(fn);
+    return this;
+  }
+  emit(event: string, ...args: any[]): boolean {
+    const set = this.handlers.get(event);
+    if (!set) return false;
+    for (const fn of set) fn(...args);
+    return true;
+  }
+  off(event: string, fn: (...args: any[]) => void): this {
+    this.handlers.get(event)?.delete(fn);
+    return this;
+  }
+  removeAllListeners(event?: string): this {
+    if (event === undefined) this.handlers.clear();
+    else this.handlers.delete(event);
+    return this;
+  }
+  setMaxListeners(_n: number): void { /* no-op for browser */ }
+}
+
+export interface ProcessTreeNode extends Omit<ProcessInstance, 'children'> {
+  children: ProcessTreeNode[];
+}
 
 // Default configuration
 const DEFAULT_CONFIG: ProcessManagerConfig = {
@@ -87,16 +114,20 @@ function generatePid(): number {
   return pidCounter++;
 }
 
-export class ProcessManager extends EventEmitter {
+export class ProcessManager extends Emitter {
   private processes = new Map<number, ProcessInstance>();
   private config: ProcessManagerConfig;
   private schedulerTimer?: ReturnType<typeof setInterval>;
   private monitorTimer?: ReturnType<typeof setInterval>;
   private running = false;
+  /** Live abort handles for tasks currently executing, so kill() can interrupt them. */
+  private abortHandles = new Map<number, AbortController>();
+  private createdAt: number;
   
   constructor(config: Partial<ProcessManagerConfig> = {}) {
     super();
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.createdAt = Date.now();
     this.setMaxListeners(100);
   }
 
@@ -123,7 +154,7 @@ export class ProcessManager extends EventEmitter {
   }
 
   // Create a new process from definition
-  create(definition: ProcessDefinition, args: Record<string, unknown> = {}): ProcessInstance {
+  create(definition: ProcessDefinition, args: Record<string, unknown> = {}, parentPid?: number): ProcessInstance {
     if (this.processes.size >= this.config.maxProcesses) {
       throw new Error(`Process limit reached (${this.config.maxProcesses})`);
     }
@@ -157,6 +188,7 @@ export class ProcessManager extends EventEmitter {
         runCount: 0,
       } : undefined,
       args,
+      ppid: parentPid,
       children: [],
       createdAt: now,
       updatedAt: now,
@@ -166,11 +198,14 @@ export class ProcessManager extends EventEmitter {
     };
 
     this.processes.set(pid, instance);
+    if (parentPid !== undefined) {
+      this.processes.get(parentPid)?.children.push(pid);
+    }
     this.emitEvent('process:created', pid, { definition: instance.definition });
     
     // Auto-start if no schedule
     if (!instance.schedule) {
-      this.startProcess(pid);
+      void this.startProcess(pid);
     } else {
       this.emitEvent('schedule:added', pid, { schedule: instance.schedule });
     }
@@ -191,6 +226,7 @@ export class ProcessManager extends EventEmitter {
 
     // Create abort controller for cancellation
     const abortController = new AbortController();
+    this.abortHandles.set(pid, abortController);
     
     // Build execution context
     const context: ProcessContext = {
@@ -201,10 +237,14 @@ export class ProcessManager extends EventEmitter {
       env: { ...process.definition.env },
       cwd: process.definition.cwd ?? '/',
       signal: abortController.signal,
-      emit: (event, data) => this.emitEvent(`process:${event}`, pid, data),
+      emit: (event, data) => this.emitEvent(`process:${event}` as ProcessEventType, pid, data),
       log: (level, message, meta) => this.appendOutput(pid, level === 'error' ? 'stderr' : 'stdout', `[${level}] ${message}`, meta),
       updateResources: (usage) => this.updateResources(pid, usage),
       shouldYield: () => false, // Could implement cooperative yielding
+      system: {
+        stats: () => this.getStats(),
+        list: (f) => this.listProcesses(f),
+      },
     };
 
     try {
@@ -231,15 +271,22 @@ export class ProcessManager extends EventEmitter {
         this.emitEvent('process:failed', pid, { result: process.result, error: result.error });
       }
     } catch (error) {
-      process.status = 'failed';
+      process.status = abortController.signal.aborted ? 'killed' : 'failed';
       process.result = {
         success: false,
-        exitCode: 1,
-        error: error instanceof Error ? error.message : String(error),
+        exitCode: abortController.signal.aborted ? 137 : 1,
+        error: abortController.signal.aborted
+          ? 'Process killed'
+          : error instanceof Error ? error.message : String(error),
         durationMs: Date.now() - process.resources.startTime,
       };
-      this.emitEvent('process:failed', pid, { result: process.result, error: process.result.error });
+      this.emitEvent(abortController.signal.aborted ? 'process:killed' : 'process:failed', pid, {
+        result: process.result,
+        error: process.result.error,
+      });
     }
+
+    this.abortHandles.delete(pid);
 
     // Run cleanup if defined
     if (process.definition.cleanup) {
@@ -255,10 +302,8 @@ export class ProcessManager extends EventEmitter {
     // Handle scheduled re-run
     if (process.schedule && process.status !== 'killed') {
       this.scheduleNextRun(process);
-    } else if (process.status !== 'running') {
-      // Process fully done, could clean up after some time
-      // For now, keep in memory for inspection
     }
+    // Process fully done — kept in memory for inspection
 
     return process;
   }
@@ -295,6 +340,12 @@ export class ProcessManager extends EventEmitter {
       throw new Error(`Process ${pid} already terminated`);
     }
 
+    // Interrupt the in-flight task first so it stops doing work, then record
+    // the terminal state. A task that ignores the signal will observe
+    // `status === 'killed'` once its await settles and will not overwrite it.
+    this.abortHandles.get(pid)?.abort();
+    this.abortHandles.delete(pid);
+
     process.status = 'killed';
     process.updatedAt = Date.now();
     process.result = {
@@ -307,8 +358,14 @@ export class ProcessManager extends EventEmitter {
     this.emitEvent('process:killed', pid, { signal, result: process.result });
     
     // Kill children recursively
-    for (const childPid of process.children) {
-      this.killProcess(childPid, signal);
+    for (const childPid of [...process.children]) {
+      const child = this.processes.get(childPid);
+      if (child && ['completed', 'failed', 'killed'].includes(child.status)) continue;
+      try {
+        this.killProcess(childPid, signal);
+      } catch {
+        /* child already gone */
+      }
     }
 
     return process;
@@ -362,12 +419,12 @@ export class ProcessManager extends EventEmitter {
   }
 
   // Get process tree (parent -> children)
-  getProcessTree(pid?: number): ProcessInstance[] {
-    const roots = pid 
+  getProcessTree(pid?: number): ProcessTreeNode[] {
+    const roots = pid
       ? [this.processes.get(pid)].filter(Boolean) as ProcessInstance[]
       : Array.from(this.processes.values()).filter(p => !p.ppid);
-    
-    const buildTree = (processes: ProcessInstance[]): ProcessInstance[] => {
+
+    const buildTree = (processes: ProcessInstance[]): ProcessTreeNode[] => {
       return processes.map(p => ({
         ...p,
         children: buildTree(p.children.map(cpid => this.processes.get(cpid)!).filter(Boolean) as ProcessInstance[]),
@@ -378,14 +435,7 @@ export class ProcessManager extends EventEmitter {
   }
 
   // Get system stats
-  getStats(): {
-    total: number;
-    byStatus: Record<ProcessStatus, number>;
-    byType: Record<ProcessType, number>;
-    totalMemory: number;
-    totalCpuTime: number;
-    uptime: number;
-  } {
+  getStats(): ProcessStats {
     const processes = Array.from(this.processes.values());
     const byStatus: Record<ProcessStatus, number> = {
       created: 0, running: 0, paused: 0, waiting: 0, completed: 0, failed: 0, killed: 0,
@@ -396,14 +446,12 @@ export class ProcessManager extends EventEmitter {
     
     let totalMemory = 0;
     let totalCpuTime = 0;
-    let oldestStart = Date.now();
 
     for (const p of processes) {
       byStatus[p.status]++;
       byType[p.definition.type]++;
       totalMemory += p.resources.memoryBytes;
       totalCpuTime += p.resources.cpuTimeMs;
-      if (p.resources.startTime < oldestStart) oldestStart = p.resources.startTime;
     }
 
     return {
@@ -412,8 +460,25 @@ export class ProcessManager extends EventEmitter {
       byType,
       totalMemory,
       totalCpuTime,
-      uptime: Date.now() - oldestStart,
+      uptime: Date.now() - this.createdAt,
     };
+  }
+
+  /** Terminate every live process. Used on shutdown and when the OS reboots. */
+  shutdown(): void {
+    this.stop();
+    for (const pid of [...this.processes.keys()]) {
+      const p = this.processes.get(pid);
+      if (!p || ['completed', 'failed', 'killed'].includes(p.status)) continue;
+      try {
+        this.killProcess(pid, 'SIGTERM');
+      } catch {
+        /* already terminated */
+      }
+    }
+    this.processes.clear();
+    this.abortHandles.clear();
+    this.emit('manager:shutdown', { timestamp: Date.now() });
   }
 
   // Clean up completed/failed/killed processes older than maxAge
@@ -431,6 +496,28 @@ export class ProcessManager extends EventEmitter {
     return cleaned;
   }
 
+  // Run a scheduled process immediately, as a one-off child.
+  //
+  // `create()` deliberately does not auto-start a scheduled definition, so a UI
+  // that wants to run one "now" must go through here rather than create()ing it
+  // (which would just sit in 'created' until its next cron/interval firing).
+  triggerNow(pid: number): ProcessInstance {
+    const parent = this.processes.get(pid);
+    if (!parent) throw new Error(`Process ${pid} not found`);
+    if (!parent.definition.schedule) {
+      // Not scheduled: just start it if it has not begun yet.
+      if (parent.status === 'created') void this.startProcess(pid);
+      return parent;
+    }
+
+    const { schedule: _ignored, ...childDefinition } = parent.definition;
+    return this.create(
+      childDefinition,
+      { ...parent.args, _scheduledRun: (parent.schedule?.runCount ?? 0) + 1 },
+      parent.pid,
+    );
+  }
+
   // Private: scheduler tick - check scheduled processes
   private tickScheduler(): void {
     const now = Date.now();
@@ -438,14 +525,20 @@ export class ProcessManager extends EventEmitter {
     for (const process of this.processes.values()) {
       if (!process.schedule) continue;
       if (process.status === 'running') continue; // Don't start if already running
-      if (process.schedule.maxRuns && process.schedule.runCount >= process.schedule.maxRuns) continue;
+      if (process.schedule.maxRuns && (process.schedule.runCount ?? 0) >= process.schedule.maxRuns) continue;
       
       if (process.schedule.nextRun && now >= process.schedule.nextRun) {
-        this.emitEvent('schedule:triggered', process.pid, { schedule: process.schedule });
-        
-        // Create new instance for this run (or reuse if designed for it)
-        const args = { ...process.args, _scheduledRun: process.schedule.runCount + 1 };
-        this.create(process.definition, args);
+        const runNumber = (process.schedule.runCount ?? 0) + 1;
+        this.emitEvent('schedule:triggered', process.pid, { schedule: process.schedule, run: runNumber });
+
+        // The triggered run is a one-off child: strip the schedule from its
+        // definition so it does not itself become a recurring scheduler entry.
+        const { schedule: _ignored, ...childDefinition } = process.definition;
+        this.create(childDefinition, { ...process.args, _scheduledRun: runNumber }, process.pid);
+
+        // Advance the parent schedule *before* yielding to the next process,
+        // otherwise every tick would fire another run of an overdue schedule.
+        this.scheduleNextRun(process);
       }
     }
   }
@@ -454,14 +547,13 @@ export class ProcessManager extends EventEmitter {
   private tickMonitor(): void {
     for (const process of this.processes.values()) {
       if (process.status !== 'running') continue;
-      
+
       // Simulate resource usage (in real implementation, would measure actual usage)
-      const elapsed = Date.now() - process.resources.startTime;
       const simulatedCpu = Math.min(100, Math.random() * 30 + 5); // 5-35%
-      const simulatedMemory = Math.min(
-        process.definition.memoryLimit ?? this.config.defaultMemoryLimit,
-        process.resources.memoryBytes + Math.random() * 1024 * 1024
-      );
+      // Deliberately NOT clamped to the limit: the sample has to be able to
+      // overshoot for the limit check below to ever fire. Clamping here made
+      // the enforcement unreachable.
+      const simulatedMemory = process.resources.memoryBytes + Math.random() * 1024 * 1024;
       
       process.resources.cpuPercent = simulatedCpu;
       process.resources.memoryBytes = simulatedMemory;
@@ -491,7 +583,10 @@ export class ProcessManager extends EventEmitter {
     
     switch (process.schedule.type) {
       case 'once':
-        return; // One-shot, don't reschedule
+        // Consumed. Park it in the far future so the scheduler stops firing it
+        // — leaving nextRun in the past would re-trigger every single tick.
+        nextRun = Number.POSITIVE_INFINITY;
+        break;
       case 'interval':
         nextRun = now + (process.schedule.value as number);
         break;

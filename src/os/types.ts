@@ -5,6 +5,7 @@ export type AppId =
   | 'calculator'
   | 'browser'
   | 'projects'
+  | 'activity'
   | 'settings'
   | 'about';
 

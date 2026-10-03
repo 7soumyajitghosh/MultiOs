@@ -4,7 +4,9 @@
  */
 
 export * from './ProcessTypes';
+export * from './BrainBridge';
 export * from './ProcessManager';
+export * from './BuiltinProcesses';
 
 // Re-export commonly used types
 export type {
@@ -24,3 +26,5 @@ export type {
 } from './ProcessTypes';
 
 export { ProcessManager, getProcessManager, createProcessManager } from './ProcessManager';
+export { setBrainBridge, getBrainBridge, hasBrainBridge, requireBrainBridge, BrainUnavailableError } from './BrainBridge';
+export { registerBuiltinProcesses, builtinProcesses, brainBackedIds } from './BuiltinProcesses';

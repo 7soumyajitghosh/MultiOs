@@ -24,7 +24,9 @@ enum vga_color {
 
 void vga_init(void);
 void vga_clear(void);
+void vga_set_color(u8 fg, u8 bg);
 void vga_setcolor(u8 fg, u8 bg);
+void vga_get_color(u8 *fg, u8 *bg);
 void vga_putc(char c);
 void vga_write(const char *s, size_t n);
 void vga_puts(const char *s);

@@ -3,8 +3,8 @@
 
 void kputc(char c);
 void kputs(const char *s);
-void kprintf(const char *fmt, ...);
-void klog(const char *tag, const char *fmt, ...);
-void panic(const char *fmt, ...);
+int  kprintf(const char *fmt, ...);
+int  klog(const char *tag, const char *fmt, ...);
+void panic(const char *msg);
 
 #endif

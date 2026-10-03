@@ -71,14 +71,37 @@ kernel/
   shell/shell.c            built-in shell: help/clear/info/mem/uptime/echo/logo
   lib/string.c             freestanding string/memory helpers
   include/...              headers
+src/                       Aurora userland (React desktop + process system)
+  system/kernel.ts         init sequence: boot / shutdown / reboot
+  system/process/          process lifecycle, scheduler, built-in services
+  apps/                    applications, incl. Activity Monitor
 scripts/
   check.sh                 host tool check
 Dockerfile                 reproducible build image
 docs/
   DESIGN.md                architecture notes
   BUILD.md                 build/run/troubleshooting
+  USERLAND.md              userland process system notes
   BRANDING.md -> ../BRANDING.md
 ```
+
+## Userland (Aurora)
+
+The repository also carries `src/`, a userland desktop that runs in the browser
+and models an OS process system: lifecycle, priorities, schedules, resource
+limits and cooperative cancellation. It is independent of `kernel/` and shares
+no code with it.
+
+```sh
+pnpm install
+pnpm dev        # vite dev server
+pnpm check      # typecheck + test + build
+```
+
+`src/system/` is part of the app's TypeScript program — it is deliberately not
+excluded from `tsconfig.app.json`, so process-system changes are typechecked
+with everything else. 47 tests cover the process lifecycle, scheduler and
+brain-bridge decoupling. See `docs/USERLAND.md`.
 
 ## Technical notes
 

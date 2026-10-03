@@ -72,3 +72,8 @@ void *memset(void *s, int c, size_t n) {
     for (size_t i = 0; i < n; i++) p[i] = (unsigned char)c;
     return s;
 }
+
+int isspace_c(int c){return c==' '||c=='\t'||c=='\n'||c=='\r'||c=='\f'||c=='\v';}
+int isdigit_c(int c){return c>='0'&&c<='9';}
+long strtol_dec(const char *s,const char **end){while(isspace_c((unsigned char)*s))s++;int neg=0;if(*s=='-'){neg=1;s++;}else if(*s=='+'){s++;}long v=0;while(isdigit_c((unsigned char)*s)){v=v*10+(*s-'0');s++;}if(end)*end=s;return neg?-v:v;}
+

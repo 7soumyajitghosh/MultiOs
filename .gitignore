@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Vite build output
+dist/
+dist-ssr/
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+*.local
+.DS_Store
+Thumbs.db
+
+# OS build
+build/
+*.o
+*.elf
+*.iso
+

@@ -17,8 +17,33 @@ int serial_ready(void) {
     return (inb(COM1 + 5) & 0x20) != 0;
 }
 
+int serial_can_read(void) {
+    /* Line Status Register bit 0 (DR): receive data register holds a byte. */
+    return (inb(COM1 + 5) & 0x01) != 0;
+}
+
+int serial_getc(void) {
+    if (!serial_can_read()) {
+        return SERIAL_NO_INPUT;
+    }
+    /* LSR bits 1..3 = overrun / framing / parity error. A byte flagged as
+     * bad is consumed and discarded so the next read is still aligned. */
+    u8 lsr = inb(COM1 + 5);
+    u8 c = inb(COM1);
+    if (lsr & 0x0E) {
+        return SERIAL_NO_INPUT;
+    }
+    /* Terminals send CR for Enter; the shell line editor expects LF. */
+    if (c == 0x0D) {
+        c = 0x0A;
+    }
+    return (int)c;
+}
+
 void serial_putc(char c) {
-    if (c == '\n') serial_putc('\r');
+    if (c == '\n') {
+        serial_putc('\r');
+    }
     while (!serial_ready()) {}
     outb(COM1, (u8)c);
 }

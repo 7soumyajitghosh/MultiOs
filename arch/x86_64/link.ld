@@ -9,22 +9,24 @@ SECTIONS
     _kernel_start = .;
 
     .multiboot : {
-        *(.multiboot)
+        /* KEEP prevents linker GC from discarding the Multiboot2 header.
+           Must stay first in the image so header lands within first 32 KiB. */
+        KEEP(*(.multiboot))
     }
 
-    .text : AT(ADDR(.text)) {
+    .text : {
         *(.text*)
     }
 
-    .rodata : AT(LOADADDR(.rodata)) {
+    .rodata : {
         *(.rodata*)
     }
 
-    .data : AT(LOADADDR(.data)) {
+    .data : {
         *(.data*)
     }
 
-    .bss : AT(LOADADDR(.bss)) {
+    .bss : {
         *(COMMON)
         *(.bss*)
     }

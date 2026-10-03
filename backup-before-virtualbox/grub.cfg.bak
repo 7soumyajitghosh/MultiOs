@@ -1,0 +1,7 @@
+set timeout=5
+set default=0
+
+menuentry "MultiOs 0.1.0 Prism" {
+    multiboot2 /boot/prismkernel.elf
+    boot
+}

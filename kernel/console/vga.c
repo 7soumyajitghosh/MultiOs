@@ -39,12 +39,8 @@ static void vga_scroll(void) {
 
 void vga_init(void) {
     cur_fg = VGA_LIGHT_GREY;
-    cur_bg = VGA_BLUE;
-    vga_clear();
-    /* Prism Dusk echo: blue background, light text. */
-    cur_fg = 0xE2E8F0 & 0xF;
-    cur_fg = VGA_LIGHT_GREY;
     cur_bg = VGA_BLACK;
+    vga_clear();
     vga_update_cursor();
 }
 
@@ -59,6 +55,10 @@ void vga_clear(void) {
 void vga_set_color(u8 fg, u8 bg) {
     cur_fg = fg & 0x0F;
     cur_bg = bg & 0x0F;
+}
+
+void vga_setcolor(u8 fg, u8 bg) {
+    vga_set_color(fg, bg);
 }
 
 void vga_get_color(u8 *fg, u8 *bg) {
@@ -99,6 +99,10 @@ void vga_putc(char c) {
     }
     vga_scroll();
     vga_update_cursor();
+}
+
+void vga_backspace(void) {
+    vga_putc('\b');
 }
 
 void vga_puts(const char *s) {

@@ -80,6 +80,8 @@ export interface ProcessContext {
   updateResources: (usage: Partial<ProcessResourceUsage>) => void;
   // Check if process should yield (for cooperative multitasking)
   shouldYield: () => boolean;
+  // Read-only view of the whole process table
+  system: ProcessSystemView;
 }
 
 export interface ProcessResult {
@@ -88,6 +90,28 @@ export interface ProcessResult {
   output?: unknown;
   error?: string;
   durationMs: number;
+}
+
+/** Aggregate view of the process table. */
+export interface ProcessStats {
+  total: number;
+  byStatus: Record<ProcessStatus, number>;
+  byType: Record<ProcessType, number>;
+  totalMemory: number;
+  totalCpuTime: number;
+  uptime: number;
+}
+
+/**
+ * Read-only handle on the process system, handed to every task.
+ *
+ * Tasks must use this rather than importing the `getProcessManager()` singleton:
+ * it keeps them decoupled from module state and makes them testable against an
+ * injected manager.
+ */
+export interface ProcessSystemView {
+  stats(): ProcessStats;
+  list(filter?: ProcessFilter): ProcessInstance[];
 }
 
 export interface ProcessInstance {
