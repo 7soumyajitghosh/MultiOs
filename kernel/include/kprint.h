@@ -1,10 +1,10 @@
 #ifndef MOS_KPRINT_H
 #define MOS_KPRINT_H
 
-#include "types.h"
-
-int kprintf(const char *fmt, ...);
-int klog(const char *tag, const char *fmt, ...);
-void panic(const char *msg);
+void kputc(char c);
+void kputs(const char *s);
+void kprintf(const char *fmt, ...);
+void klog(const char *tag, const char *fmt, ...);
+void panic(const char *fmt, ...);
 
 #endif

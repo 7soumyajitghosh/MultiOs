@@ -1,0 +1,68 @@
+# MultiOs — top-level Makefile (original).
+# Builds prismkernel.elf and a bootable ISO with GRUB (Multiboot2).
+# Host tools only: gcc, nasm, ld, grub-mkrescue, qemu, xorriso, mtools.
+#
+# Usage:
+#   make            - build kernel ELF + ISO
+#   make run        - run ISO in QEMU (VGA + serial to stdio)
+#   make run-serial - run with serial only on stdio (curses-free log)
+#   make clean      - remove build artifacts
+#   make check      - verify host tools
+
+CC      ?= gcc
+NASM    ?= nasm
+LD      ?= ld
+GRUB_MKRESCUE ?= grub-mkrescue
+QEMU    ?= qemu-system-x86_64
+
+BUILD   := build
+ISO_DIR := $(BUILD)/iso
+KERNEL_ELF := $(BUILD)/prismkernel.elf
+ISO     := $(BUILD)/multios.iso
+
+CFLAGS  := -std=c11 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector \
+           -mno-red-zone -m64 -Wall -Wextra -Werror -O2 -I kernel/include -g
+NASMFLAGS := -f elf64 -g -F dwarf
+LDFLAGS := -n -T arch/x86_64/link.ld
+
+C_SRCS := $(shell find kernel -name '*.c')
+ASM_SRCS := boot/boot.asm boot/isr_stubs.asm
+C_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(C_SRCS))
+ASM_OBJS := $(patsubst %.asm,$(BUILD)/%.o,$(ASM_SRCS))
+OBJS := $(ASM_OBJS) $(C_OBJS)
+
+.PHONY: all iso run run-serial clean check
+
+all: $(KERNEL_ELF) $(ISO)
+
+$(BUILD)/boot/%.o: boot/%.asm
+	@mkdir -p $(dir $@)
+	$(NASM) $(NASMFLAGS) $< -o $@
+
+$(BUILD)/kernel/%.o: kernel/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(KERNEL_ELF): $(OBJS) arch/x86_64/link.ld
+	@mkdir -p $(dir $@)
+	$(LD) $(LDFLAGS) -o $@ $(OBJS)
+	@echo "kernel: $@"
+
+$(ISO): $(KERNEL_ELF) iso/boot/grub/grub.cfg
+	@mkdir -p $(ISO_DIR)/boot/grub
+	cp $(KERNEL_ELF) $(ISO_DIR)/boot/prismkernel.elf
+	cp iso/boot/grub/grub.cfg $(ISO_DIR)/boot/grub/grub.cfg
+	$(GRUB_MKRESCUE) -o $@ $(ISO_DIR)
+	@echo "iso: $@"
+
+run: $(ISO)
+	$(QEMU) -cdrom $(ISO) -serial stdio -m 512M
+
+run-serial: $(ISO)
+	$(QEMU) -cdrom $(ISO) -serial stdio -display none -m 512M
+
+clean:
+	rm -rf $(BUILD)
+
+check:
+	bash scripts/check.sh
